@@ -1,0 +1,16 @@
+.env
+.venv/
+.playwright-mcp/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+logs/
+
+game_workspace/runs/
+game_workspace/**/*.log
+game_workspace/**/test-report.json
+
+game_templates/**/node_modules/
+game_templates/**/dist/
+game_templates/**/.playwright-mcp/

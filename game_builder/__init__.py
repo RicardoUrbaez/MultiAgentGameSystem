@@ -1,1 +1,1 @@
-from . import agent
+"""Multi-agent game builder package."""

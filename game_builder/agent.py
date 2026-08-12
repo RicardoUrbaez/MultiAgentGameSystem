@@ -2,8 +2,10 @@ import asyncio
 import os
 import time
 
-from google.adk.agents import LlmAgent, LoopAgent, SequentialAgent
+from google.adk.agents import LlmAgent
+from google.adk.agents.context import Context
 from google.adk.tools.tool_context import ToolContext
+from google.adk.workflow import START, Workflow
 
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import (
@@ -11,6 +13,9 @@ from google.adk.tools.mcp_tool.mcp_session_manager import (
 )
 
 from mcp import StdioServerParameters
+
+from game_builder.schemas import GameManifest, ReviewDecision
+from game_builder.tools import build_tools, preview_tools, workspace_tools
 
 
 # =========================================================
@@ -90,14 +95,14 @@ GAME_WORKSPACE = os.path.join(
     "game_workspace"
 )
 
-os.makedirs(
+GAME_RUNS_DIR = os.path.join(
     GAME_WORKSPACE,
-    exist_ok=True,
+    "runs"
 )
 
-GAME_INDEX_PATH = os.path.join(
-    GAME_WORKSPACE,
-    "index.html",
+os.makedirs(
+    GAME_RUNS_DIR,
+    exist_ok=True,
 )
 
 
@@ -105,13 +110,12 @@ GAME_INDEX_PATH = os.path.join(
 # GAME SERVER
 # =========================================================
 #
-# Keep this running separately:
-#
-# python -m http.server 5500 --directory .\game_workspace
+# Preview is started deterministically for the active run after
+# typecheck and build pass.
 #
 # =========================================================
 
-GAME_URL = "http://127.0.0.1:5500/index.html"
+DEFAULT_PREVIEW_PORT = 5500
 
 
 # =========================================================
@@ -119,10 +123,417 @@ GAME_URL = "http://127.0.0.1:5500/index.html"
 # =========================================================
 
 STATE_GAME_DESIGN = "game_design"
+STATE_GAME_MANIFEST = "game_manifest"
 STATE_TECHNICAL_PLAN = "technical_plan"
 STATE_BUILD_SUMMARY = "build_summary"
 STATE_TEST_REPORT = "test_report"
-STATE_REVIEW_FEEDBACK = "review_feedback"
+STATE_REVIEW_DECISION = "review_decision"
+STATE_REVIEW_FEEDBACK = STATE_REVIEW_DECISION
+STATE_CURRENT_RUN_ID = "current_run_id"
+STATE_CURRENT_RUN_PATH = "current_run_path"
+STATE_RUN_ID = "run_id"
+STATE_RUN_PATH = "run_path"
+STATE_CURRENT_ROUTE = "current_route"
+STATE_ROUTE = STATE_CURRENT_ROUTE
+STATE_ROUTE_HISTORY = "route_history"
+STATE_ITERATION = "iteration"
+STATE_ITERATION_COUNT = STATE_ITERATION
+STATE_BUILD_RESULT = "build_result"
+STATE_BUILD_GATE = STATE_BUILD_RESULT
+STATE_BUILD_GATE_HISTORY = "build_gate_history"
+STATE_TYPECHECK_RESULT = "typecheck_result"
+STATE_PREVIEW_PORT = "preview_port"
+STATE_PREVIEW_URL = "preview_url"
+STATE_REPEATED_FAILURE_SIGNATURE = "repeated_failure_signature"
+STATE_REPEATED_FAILURE_COUNT = "repeated_failure_count"
+STATE_APPROVAL_STATUS = "approval_status"
+STATE_WORKFLOW_STATUS = STATE_APPROVAL_STATUS
+STATE_MAX_ITERATIONS = "max_iterations"
+STATE_DEVELOPER_REVISION_COUNT = "developer_revision_count"
+STATE_REPLAN_COUNT = "replan_count"
+STATE_HUMAN_REVIEW_REQUIRED = "human_review_required"
+STATE_HUMAN_REVIEW_REASON = "human_review_reason"
+STATE_RUN_ID_ALIAS = STATE_RUN_ID
+STATE_RUN_PATH_ALIAS = STATE_RUN_PATH
+
+ROUTE_APPROVE = "APPROVE"
+ROUTE_REVISE_DEVELOPER = "REVISE_DEVELOPER"
+ROUTE_REPLAN = "REPLAN"
+ROUTE_HUMAN_REVIEW = "HUMAN_REVIEW"
+
+BUILD_ROUTE_SUCCESS = "BUILD_SUCCESS"
+BUILD_ROUTE_FAILED = "BUILD_FAILED"
+
+APPROVED = "APPROVED"
+WAITING_FOR_HUMAN = "WAITING_FOR_HUMAN"
+
+MAX_ROUTE_ITERATIONS = 3
+MAX_REPEATED_FAILURES = 2
+
+VALID_REVIEW_ROUTES = {
+    ROUTE_APPROVE,
+    ROUTE_REVISE_DEVELOPER,
+    ROUTE_REPLAN,
+    ROUTE_HUMAN_REVIEW,
+}
+
+PHASER_TEMPLATE_DIR = str(workspace_tools.PHASER_TEMPLATE_DIR)
+
+
+def _first_route_label(text: str) -> str | None:
+    for raw_line in text.splitlines():
+        line = raw_line.strip().upper()
+        if not line:
+            continue
+        if line in VALID_REVIEW_ROUTES:
+            return line
+        token = line.split()[0].rstrip(":")
+        if token in VALID_REVIEW_ROUTES:
+            return token
+        return None
+    return None
+
+
+def choose_reviewer_route(
+    review_feedback: str,
+    iteration_count: int,
+    repeated_failure_count: int,
+) -> str:
+    route = _first_route_label(review_feedback)
+
+    if route == ROUTE_APPROVE:
+        return ROUTE_APPROVE
+
+    if (
+        iteration_count >= MAX_ROUTE_ITERATIONS
+        or repeated_failure_count >= MAX_REPEATED_FAILURES
+    ):
+        return ROUTE_HUMAN_REVIEW
+
+    if route in VALID_REVIEW_ROUTES:
+        return route
+
+    return ROUTE_HUMAN_REVIEW
+
+
+def failure_signature(text: str) -> str:
+    normalized = " ".join(text.lower().split())
+    return normalized[:240]
+
+
+def update_repeated_failure_state(state, latest_failure_text: str) -> int:
+    signature = failure_signature(latest_failure_text)
+    previous_signature = state.get(STATE_REPEATED_FAILURE_SIGNATURE)
+    previous_count = int(state.get(STATE_REPEATED_FAILURE_COUNT, 0) or 0)
+
+    if signature and signature == previous_signature:
+        count = previous_count + 1
+    else:
+        count = 1 if signature else 0
+
+    state[STATE_REPEATED_FAILURE_SIGNATURE] = signature
+    state[STATE_REPEATED_FAILURE_COUNT] = count
+    return count
+
+
+def record_route_state(state, route: str) -> None:
+    history = list(state.get(STATE_ROUTE_HISTORY, []) or [])
+    history.append(
+        {
+            "route": route,
+            "iteration": int(state.get(STATE_ITERATION_COUNT, 0) or 0),
+        }
+    )
+    state[STATE_ROUTE] = route
+    state[STATE_CURRENT_ROUTE] = route
+    state[STATE_ROUTE_HISTORY] = history
+
+
+def _coerce_review_decision(review_feedback: str) -> ReviewDecision:
+    feedback = str(review_feedback or "").strip()
+    route = ROUTE_HUMAN_REVIEW if not feedback else choose_reviewer_route(
+        review_feedback=feedback,
+        iteration_count=int(
+            __import__("builtins").locals().get("_state", {}).get(STATE_ITERATION_COUNT, 0) or 0
+        ) if False else 0,
+        repeated_failure_count=0,
+    )
+    defects: list[str] = []
+    required_changes: list[str] = []
+    for line in feedback.splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        if clean.startswith(("APPROVE", "REVISE_DEVELOPER", "REPLAN", "HUMAN_REVIEW")):
+            continue
+        if clean.startswith(("1.", "2.", "-", "*")):
+            defects.append(clean[2:].strip() if clean.startswith("1.") or clean.startswith("2.") else clean.strip("-* "))
+        elif clean.lower().startswith("change:"):
+            required_changes.append(clean.split(":", 1)[1].strip())
+        elif clean.lower().startswith("required"):
+            required_changes.append(clean)
+    if not defects and "defect" in feedback.lower():
+        defects.append(feedback)
+    score = (
+        90 if route == ROUTE_APPROVE
+        else 75 if route == ROUTE_REVISE_DEVELOPER
+        else 65 if route == ROUTE_REPLAN
+        else 40
+    )
+    return ReviewDecision(
+        route=route,
+        score=score,
+        reasoning=feedback or "No review reasoning supplied.",
+        defects=defects,
+        required_changes=required_changes,
+    )
+
+
+def record_reviewer_route(callback_context: Context):
+    state = callback_context.state
+    if state.get(STATE_ROUTE) == ROUTE_APPROVE:
+        callback_context.actions.route = ROUTE_APPROVE
+        state[STATE_WORKFLOW_STATUS] = APPROVED
+        state[STATE_APPROVAL_STATUS] = APPROVED
+        return None
+
+    review_feedback = str(state.get(STATE_REVIEW_FEEDBACK, ""))
+    repeated_failure_count = update_repeated_failure_state(
+        state,
+        review_feedback,
+    )
+    route = choose_reviewer_route(
+        review_feedback=review_feedback,
+        iteration_count=int(state.get(STATE_ITERATION_COUNT, 0) or 0),
+        repeated_failure_count=repeated_failure_count,
+    )
+    decision = _coerce_review_decision(review_feedback)
+    decision.route = route
+    state[STATE_REVIEW_DECISION] = decision.model_dump()
+    state[STATE_REVIEW_FEEDBACK] = review_feedback
+    state[STATE_CURRENT_ROUTE] = route
+    state[STATE_ROUTE] = route
+    state[STATE_APPROVAL_STATUS] = APPROVED if route == ROUTE_APPROVE else WAITING_FOR_HUMAN if route == ROUTE_HUMAN_REVIEW else "IN_PROGRESS"
+    state[STATE_HUMAN_REVIEW_REQUIRED] = route == ROUTE_HUMAN_REVIEW
+    state[STATE_HUMAN_REVIEW_REASON] = (
+        decision.reasoning if route == ROUTE_HUMAN_REVIEW else ""
+    )
+    state[STATE_MAX_ITERATIONS] = MAX_ROUTE_ITERATIONS
+    record_route_state(state, route)
+    callback_context.actions.route = route
+
+    if route == ROUTE_APPROVE:
+        state[STATE_WORKFLOW_STATUS] = APPROVED
+        state[STATE_APPROVAL_STATUS] = APPROVED
+    elif route == ROUTE_HUMAN_REVIEW:
+        state[STATE_WORKFLOW_STATUS] = WAITING_FOR_HUMAN
+        state[STATE_APPROVAL_STATUS] = WAITING_FOR_HUMAN
+
+    return None
+
+
+def _extract_design_field(design: str, field_name: str) -> str:
+    prefix = f"{field_name}:"
+    for line in design.splitlines():
+        if line.strip().upper().startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _default_manifest_from_state(state) -> GameManifest:
+    design = str(state.get(STATE_GAME_DESIGN, ""))
+    title = _extract_design_field(design, "TITLE") or "Generated Phaser Game"
+    genre = _extract_design_field(design, "GENRE") or "Arcade"
+
+    return GameManifest(
+        title=title,
+        genre=genre,
+        player_count=1,
+        camera="STATIC",
+        physics="ARCADE",
+        scenes=["Boot", "Preloader", "MainMenu", "Game", "GameOver"],
+        mechanics=["player input", "scoring", "restart"],
+        required_assets=[],
+        acceptance_tests=[
+            "Phaser app boots without runtime errors",
+            "window.__GAME_TEST__ exposes getState, reset, and errors",
+            "Controls produce observable runtime state changes",
+            "Reset returns the game to a sensible initial state",
+        ],
+        has_menu=True,
+        has_audio=False,
+        has_particles=False,
+        has_progression=False,
+    )
+
+
+def create_run_workspace(ctx: Context):
+    """
+    Create one isolated Phaser project for this user request.
+    Revisions continue inside the same active run.
+    """
+    state = ctx.state
+    state.setdefault(STATE_MAX_ITERATIONS, MAX_ROUTE_ITERATIONS)
+    state.setdefault(STATE_ITERATION_COUNT, 0)
+    state.setdefault(STATE_DEVELOPER_REVISION_COUNT, 0)
+    state.setdefault(STATE_REPLAN_COUNT, 0)
+    state.setdefault(STATE_HUMAN_REVIEW_REQUIRED, False)
+    state.setdefault(STATE_HUMAN_REVIEW_REASON, "")
+    state.setdefault(STATE_APPROVAL_STATUS, "PENDING")
+
+    existing_run_id = state.get(STATE_CURRENT_RUN_ID) or state.get(STATE_RUN_ID)
+    if existing_run_id:
+        existing_run_path = workspace_tools.get_run_path(str(existing_run_id))
+        state[STATE_CURRENT_RUN_ID] = str(existing_run_id)
+        state[STATE_RUN_ID] = str(existing_run_id)
+        state[STATE_CURRENT_RUN_PATH] = str(existing_run_path)
+        state[STATE_RUN_PATH] = str(existing_run_path)
+        return "RUN_WORKSPACE_EXISTS"
+
+    run_id = workspace_tools.create_next_run_id()
+    run_path = workspace_tools.create_run_from_phaser_template(run_id)
+    manifest = _default_manifest_from_state(state)
+
+    state[STATE_CURRENT_RUN_ID] = run_id
+    state[STATE_RUN_ID] = run_id
+    state[STATE_CURRENT_RUN_PATH] = str(run_path)
+    state[STATE_RUN_PATH] = str(run_path)
+    state[STATE_GAME_MANIFEST] = manifest.model_dump()
+    state[STATE_PREVIEW_PORT] = DEFAULT_PREVIEW_PORT
+    state[STATE_MAX_ITERATIONS] = MAX_ROUTE_ITERATIONS
+    state[STATE_APPROVAL_STATUS] = "PENDING"
+
+    return "RUN_WORKSPACE_CREATED"
+
+
+def build_gate(ctx: Context):
+    """
+    Run after every GameplayDeveloper turn. A successful build
+    automatically routes to Playtester for a real retest.
+    """
+
+    iteration_count = int(ctx.state.get(STATE_ITERATION_COUNT, 0) or 0) + 1
+    ctx.state[STATE_ITERATION_COUNT] = iteration_count
+    ctx.state[STATE_ITERATION] = iteration_count
+    ctx.state[STATE_MAX_ITERATIONS] = MAX_ROUTE_ITERATIONS
+    run_id = str(ctx.state.get(STATE_CURRENT_RUN_ID, ctx.state.get(STATE_RUN_ID, "")))
+
+    if not run_id:
+        ctx.state[STATE_TEST_REPORT] = (
+            "OVERALL: FAIL\n"
+            "PAGE_LOAD: NOT_RUN\n"
+            "TEST_API: NOT_RUN\n"
+            "RUNTIME_ERRORS: NO_ACTIVE_RUN\n"
+            "CONTROLS: NOT_RUN\n"
+            "RESET: NOT_RUN\n"
+            "DESIGN_COMPLIANCE: NOT_RUN\n"
+            "DEFECTS:\n1. No active generated run exists."
+        )
+        ctx.state[STATE_BUILD_RESULT] = {
+            "success": False,
+            "exit_code": 1,
+            "command": "",
+            "stdout": "",
+            "stderr": "No active generated run exists.",
+            "log_path": "",
+            "status": BUILD_ROUTE_FAILED,
+            "iteration": iteration_count,
+        }
+        ctx.state[STATE_BUILD_GATE] = ctx.state[STATE_BUILD_RESULT]
+        ctx.route = BUILD_ROUTE_FAILED
+        return "BUILD_GATE_FAIL"
+
+    typecheck_result = build_tools.npm_typecheck(run_id)
+    ctx.state[STATE_TYPECHECK_RESULT] = typecheck_result.model_dump()
+
+    if not typecheck_result.success:
+        output = "\n".join(
+            str(part).strip()
+            for part in [
+                getattr(typecheck_result, "stdout", ""),
+                getattr(typecheck_result, "stderr", ""),
+            ]
+            if str(part).strip()
+        )
+        build_record = typecheck_result.model_dump()
+        build_record["iteration"] = iteration_count
+        build_record["status"] = BUILD_ROUTE_FAILED
+        history = list(ctx.state.get(STATE_BUILD_GATE_HISTORY, []) or [])
+        history.append(build_record)
+        ctx.state[STATE_BUILD_RESULT] = build_record
+        ctx.state[STATE_BUILD_GATE] = build_record
+        ctx.state[STATE_BUILD_GATE_HISTORY] = history
+        ctx.state[STATE_TEST_REPORT] = (
+            "OVERALL: FAIL\n"
+            "PAGE_LOAD: NOT_RUN\n"
+            "TEST_API: NOT_RUN\n"
+            "RUNTIME_ERRORS: TYPECHECK_FAILED\n"
+            "CONTROLS: NOT_RUN\n"
+            "RESET: NOT_RUN\n"
+            "DESIGN_COMPLIANCE: NOT_RUN\n"
+            f"DEFECTS:\n1. Phaser TypeScript typecheck failed in "
+            f"iteration {iteration_count}.\n\n{output[-2000:]}"
+        )
+        ctx.route = BUILD_ROUTE_FAILED
+        return "BUILD_GATE_FAIL"
+
+    result = build_tools.npm_build(run_id)
+
+    output = "\n".join(
+        str(part).strip()
+        for part in [
+            getattr(result, "stdout", ""),
+            getattr(result, "stderr", ""),
+        ]
+        if str(part).strip()
+    )
+    build_record = result.model_dump()
+    build_record["iteration"] = iteration_count
+    build_record["status"] = (
+        BUILD_ROUTE_SUCCESS
+        if result.success
+        else BUILD_ROUTE_FAILED
+    )
+
+    history = list(ctx.state.get(STATE_BUILD_GATE_HISTORY, []) or [])
+    history.append(build_record)
+
+    ctx.state[STATE_BUILD_RESULT] = build_record
+    ctx.state[STATE_BUILD_GATE] = build_record
+    ctx.state[STATE_BUILD_GATE_HISTORY] = history
+
+    if result.success:
+        port = int(ctx.state.get(STATE_PREVIEW_PORT, DEFAULT_PREVIEW_PORT))
+        preview_url = preview_tools.start_preview(run_id, port)
+        ctx.state[STATE_PREVIEW_URL] = preview_url
+        ctx.route = BUILD_ROUTE_SUCCESS
+        return "BUILD_GATE_PASS"
+
+    ctx.state[STATE_TEST_REPORT] = (
+        "OVERALL: FAIL\n"
+        "PAGE_LOAD: NOT_RUN\n"
+        "TEST_API: NOT_RUN\n"
+        "RUNTIME_ERRORS: BUILD_FAILED\n"
+        "CONTROLS: NOT_RUN\n"
+        "RESET: NOT_RUN\n"
+        "DESIGN_COMPLIANCE: NOT_RUN\n"
+        f"DEFECTS:\n1. Phaser production build failed in iteration "
+        f"{iteration_count}.\n\n{output[-2000:]}"
+    )
+    ctx.route = BUILD_ROUTE_FAILED
+    return "BUILD_GATE_FAIL"
+
+
+def finalize_run(ctx: Context):
+    ctx.state[STATE_WORKFLOW_STATUS] = APPROVED
+    ctx.route = ROUTE_APPROVE
+    return "FINALIZED"
+
+
+def human_review(ctx: Context):
+    ctx.state[STATE_WORKFLOW_STATUS] = WAITING_FOR_HUMAN
+    ctx.route = ROUTE_HUMAN_REVIEW
+    return "WAITING_FOR_HUMAN"
 
 
 # =========================================================
@@ -150,7 +561,7 @@ filesystem_mcp = McpToolset(
                 "npx",
                 "-y",
                 "@modelcontextprotocol/server-filesystem",
-                GAME_WORKSPACE,
+                GAME_RUNS_DIR,
             ],
         ),
     ),
@@ -221,8 +632,8 @@ playwright_mcp = McpToolset(
 
 def exit_loop(tool_context: ToolContext):
     """
-    Exit the real Google ADK LoopAgent after independent
-    browser testing passes and BugReviewer approves.
+    Signal approval after independent browser testing passes
+    and BugReviewer approves.
     """
 
     print(
@@ -232,6 +643,9 @@ def exit_loop(tool_context: ToolContext):
 
     tool_context.actions.escalate = True
     tool_context.actions.skip_summarization = True
+    tool_context.actions.route = ROUTE_APPROVE
+    record_route_state(tool_context.state, ROUTE_APPROVE)
+    tool_context.state[STATE_WORKFLOW_STATUS] = APPROVED
 
     return {
         "status": "APPROVED",
@@ -307,20 +721,33 @@ GAME DESIGN:
 
 {game_design}
 
-Create a concise implementation plan for ONE completely
-self-contained browser file:
+LATEST REVIEW FEEDBACK:
 
-index.html
+{review_decision?}
 
-The file must contain:
+Create a concise implementation plan for one isolated Phaser 2D
+TypeScript project generated from the approved template.
 
-- HTML
-- CSS inside <style>
-- JavaScript inside <script>
+The deterministic runtime will create:
 
-No external dependencies are permitted.
+game_workspace/runs/<current_run_id>/
+
+The implementation should edit project files inside that active
+run only, usually:
+
+- src/game/scenes/Game.ts
+- src/game/scenes/MainMenu.ts
+- src/game/scenes/GameOver.ts
+- src/game/main.ts
+- public/style.css
+
+Do not plan edits to game_templates/phaser-2d.
+Do not choose another engine.
 
 Define:
+
+GAME MANIFEST:
+engine must be PHASER_2D
 
 ARCHITECTURE:
 GAME STATE:
@@ -362,6 +789,10 @@ window.__GAME_TEST__.errors
 
 Do not write the implementation.
 
+If LATEST REVIEW FEEDBACK begins with REPLAN, revise the
+technical plan to directly address the BugReviewer's defects
+before GameplayDeveloper runs again.
+
 Output only the technical plan.
 """,
 
@@ -378,17 +809,17 @@ Output only the technical plan.
 # AGENT 3 — GAMEPLAY DEVELOPER
 # =========================================================
 #
-# This agent is INSIDE the LoopAgent.
+# This agent is inside the ADK routing workflow.
 #
 # INITIAL ITERATION:
 #
-#   writes index.html through Filesystem MCP
+#   edits the active Phaser run through Filesystem MCP
 #
 # REVISION ITERATION:
 #
-#   reads existing index.html through MCP
+#   reads existing active-run files through MCP
 #   repairs it
-#   writes replacement through MCP
+#   writes replacements through MCP
 #
 # It CANNOT approve itself.
 # =========================================================
@@ -414,14 +845,27 @@ TECHNICAL PLAN:
 
 LATEST REVIEW FEEDBACK:
 
-{{review_feedback?}}
+{{review_decision?}}
 
 You have access to a REAL filesystem through Model Context
 Protocol.
 
 The production artifact is:
 
-{GAME_INDEX_PATH}
+game_workspace/runs/{{current_run_id}}/
+
+The Filesystem MCP root is scoped to:
+
+{GAME_RUNS_DIR}
+
+Use run-relative paths such as:
+
+{{current_run_id}}/src/game/scenes/Game.ts
+{{current_run_id}}/src/game/scenes/MainMenu.ts
+{{current_run_id}}/src/game/scenes/GameOver.ts
+{{current_run_id}}/public/style.css
+
+Do not read or write game_templates/phaser-2d.
 
 ============================================================
 INITIAL BUILD
@@ -431,9 +875,8 @@ If LATEST REVIEW FEEDBACK is empty:
 
 Create the first implementation.
 
-Call write_file exactly once.
-
-Write a complete self-contained index.html.
+Use the existing Phaser project inside the active run.
+Call write_file for the TypeScript/CSS files that must change.
 
 ============================================================
 REVISION
@@ -443,38 +886,34 @@ If LATEST REVIEW FEEDBACK contains:
 
 REVISE_DEVELOPER
 
+or:
+
+REPLAN
+
 then this is a revision cycle.
 
 First call read_text_file on:
 
-{GAME_INDEX_PATH}
+the active run files you need to repair.
 
 Study the existing implementation.
 
 Then fix EVERY defect identified by BugReviewer.
 
-Call write_file exactly once to replace index.html with
-the corrected complete implementation.
+Call write_file for the corrected complete files.
 
 ============================================================
 GAME REQUIREMENTS
 ============================================================
 
-index.html must contain:
-
-- <!DOCTYPE html>
-- complete HTML
-- CSS inside <style>
-- JavaScript inside <script>
+The active run is a Phaser 2D TypeScript project.
 
 Do NOT use:
 
-- external libraries
-- external scripts
-- external stylesheets
 - CDNs
 - network requests
 - server-side code
+- new npm dependencies unless the TechnicalPlanner explicitly required them
 
 The game must actually implement the Game Design and
 Technical Plan.
@@ -554,7 +993,7 @@ BUILD_COMPLETE
 
 and one or two sentences describing what was created/fixed.
 
-Do NOT output the entire source code as your final message.
+Do NOT output entire source files as your final message.
 
 Do NOT call exit_loop.
 
@@ -626,9 +1065,13 @@ BUILD SUMMARY:
 
 {{build_summary}}
 
+BUILD RESULT:
+
+{{build_result?}}
+
 Test the REAL generated game at:
 
-{GAME_URL}
+{{preview_url}}
 
 You have access to Microsoft's real Playwright MCP server.
 
@@ -652,7 +1095,7 @@ CALL 1 — NAVIGATE
 
 Use browser_navigate to open:
 
-{GAME_URL}
+{{preview_url}}
 
 ============================================================
 CALL 2 — COMPLETE BROWSER TEST
@@ -776,11 +1219,13 @@ Never claim a test passed without browser evidence.
 #
 # Reviewer decides:
 #
-# PASS -> exit real LoopAgent
+# APPROVE -> finalize the run
 #
-# FAIL -> REVISE_DEVELOPER
+# REVISE_DEVELOPER -> send work back to GameplayDeveloper
 #
-# The LoopAgent then automatically starts another iteration.
+# REPLAN -> send work back through TechnicalPlanner
+#
+# HUMAN_REVIEW -> stop autonomous routing for human inspection.
 # =========================================================
 
 bug_reviewer = LlmAgent(
@@ -788,6 +1233,7 @@ bug_reviewer = LlmAgent(
     model=MODEL,
 
     before_model_callback=throttle_model_calls,
+    after_agent_callback=record_reviewer_route,
 
     include_contents="none",
 
@@ -806,7 +1252,24 @@ REAL BROWSER TEST REPORT:
 
 {test_report}
 
+TYPECHECK RESULT:
+
+{typecheck_result?}
+
+BUILD RESULT:
+
+{build_result?}
+
 Evaluate the Playtester's evidence.
+
+You alone control production routing.
+
+Your final response MUST begin with exactly one route label:
+
+APPROVE
+REVISE_DEVELOPER
+REPLAN
+HUMAN_REVIEW
 
 ============================================================
 APPROVE
@@ -822,13 +1285,18 @@ If the game passes:
 
 Call exit_loop.
 
+Then begin your final answer with:
+
+APPROVE
+
 Do not request unnecessary cosmetic changes.
 
 ============================================================
-REVISE
+REVISE_DEVELOPER
 ============================================================
 
-If any important test failed:
+If browser evidence shows implementation defects that the
+current technical plan can still support:
 
 Do NOT call exit_loop.
 
@@ -850,6 +1318,34 @@ REVISE_DEVELOPER
 Do not modify the game yourself.
 
 Do not invent defects.
+
+============================================================
+REPLAN
+============================================================
+
+If the test/build evidence shows the implementation plan is
+wrong, incomplete, or missing acceptance criteria, do NOT call
+exit_loop.
+
+Return exactly this routing label first:
+
+REPLAN
+
+Then provide concise plan-level defects that TechnicalPlanner
+must address.
+
+============================================================
+HUMAN_REVIEW
+============================================================
+
+If failures are repeated, unrecoverable, blocked by the runtime,
+or unsafe to continue autonomously, do NOT call exit_loop.
+
+Return exactly this routing label first:
+
+HUMAN_REVIEW
+
+Then explain what a human must inspect.
 """,
 
     description=(
@@ -866,106 +1362,69 @@ Do not invent defects.
 
 
 # =========================================================
-# REAL GOOGLE ADK AGENTIC LOOP
+# ROOT GOOGLE ADK ROUTING WORKFLOW
 # =========================================================
 #
-# This is NOT frontend logic.
+# This is NOT frontend logic and not a simulated router.
+# It is the actual Google ADK Workflow graph.
 #
-# This is the actual Google ADK LoopAgent.
+# START
+#   -> GameDesigner
+#   -> create_run_workspace
+#   -> TechnicalPlanner
+#   -> GameplayDeveloper
+#   -> build_gate
+#        BUILD_SUCCESS -> Playtester -> BugReviewer
+#        BUILD_FAILED  -> BugReviewer
 #
+# BugReviewer emits exactly one production route:
 #
-#       GameplayDeveloper
-#              |
-#              | Filesystem MCP
-#              v
-#        real index.html
-#              |
-#              v
-#         Playtester
-#              |
-#              | Playwright MCP
-#              v
-#         real browser
-#              |
-#              v
-#         BugReviewer
-#              |
-#         +----+----+
-#         |         |
-#       PASS       FAIL
-#         |         |
-#         v         |
-#     exit_loop     |
-#                   |
-#                   +------------+
-#                                |
-#                         ADK next iteration
-#                                |
-#                                v
-#                       GameplayDeveloper
+# APPROVE
+#   -> finalize_run
 #
+# REVISE_DEVELOPER
+#   -> GameplayDeveloper -> build_gate -> Playtester -> BugReviewer
+#
+# REPLAN
+#   -> TechnicalPlanner -> create_run_workspace -> GameplayDeveloper
+#      -> build_gate -> Playtester -> BugReviewer
+#
+# HUMAN_REVIEW
+#   -> human_review
+#
+# The graph preserves route traceability through ADK events
+# with actions.route.
 # =========================================================
 
-build_test_review_loop = LoopAgent(
-    name="BuildTestReviewLoop",
-
-    sub_agents=[
-        gameplay_developer,
-        playtester,
-        bug_reviewer,
-    ],
-
-    max_iterations=3,
-)
-
-
-# =========================================================
-# ROOT MULTI-AGENT WORKFLOW
-# =========================================================
-#
-#
-#               USER REQUEST
-#                    |
-#                    v
-#              GameDesigner
-#                    |
-#                    v
-#            TechnicalPlanner
-#                    |
-#                    v
-#       +--- BuildTestReviewLoop ---+
-#       |                           |
-#       | GameplayDeveloper         |
-#       |      |                    |
-#       |      | Filesystem MCP     |
-#       |      v                    |
-#       | real game                 |
-#       |      |                    |
-#       |      v                    |
-#       | Playtester                |
-#       |      |                    |
-#       |      | Playwright MCP     |
-#       |      v                    |
-#       | real browser              |
-#       |      |                    |
-#       |      v                    |
-#       | BugReviewer               |
-#       |      |                    |
-#       | PASS / REVISE             |
-#       |      |                    |
-#       |      +-------- LOOP ------+
-#       |
-#       +---------------------------+
-#
-# =========================================================
-
-root_agent = SequentialAgent(
+root_agent = Workflow(
     name="MultiAgentGameBuilder",
 
-    sub_agents=[
-        game_designer,
-        technical_planner,
-        build_test_review_loop,
+    edges=[
+        (
+            START,
+            game_designer,
+            create_run_workspace,
+            technical_planner,
+            gameplay_developer,
+            build_gate,
+            {
+                BUILD_ROUTE_SUCCESS: playtester,
+                BUILD_ROUTE_FAILED: bug_reviewer,
+            },
+        ),
+        (
+            playtester,
+            bug_reviewer,
+        ),
+        (
+            bug_reviewer,
+            {
+                ROUTE_APPROVE: finalize_run,
+                ROUTE_REVISE_DEVELOPER: gameplay_developer,
+                ROUTE_REPLAN: technical_planner,
+                ROUTE_HUMAN_REVIEW: human_review,
+            },
+        ),
     ],
 
     description="""
@@ -976,29 +1435,45 @@ Five specialized agents collaborate to:
 1. design a browser game
 2. create a technical plan
 3. implement executable code
-4. test the real browser environment
-5. independently review the evidence
-6. revise failed implementations
-7. automatically retest revisions
-8. stop only after approval or the iteration bound
+4. run a production build gate
+5. test the real browser environment
+6. independently review the evidence
+7. route through approval, developer revision, replanning, or human review
+8. automatically rebuild every developer revision
+9. automatically retest every successful rebuild
 
 The runtime uses:
 
 - Google Agent Development Kit
 - LlmAgent
-- SequentialAgent
-- LoopAgent
+- Workflow
 - shared session state
 - before-model callbacks
+- after-agent route callbacks
 - Filesystem MCP
 - Microsoft Playwright MCP
 - real filesystem operations
+- Phaser production build workflow
 - real browser execution
 - objective runtime evidence
-- reviewer-controlled approval
+- reviewer-controlled routing
 - bounded autonomous iteration
 
 The UI does not simulate these actions.
-Google ADK executes the workflow.
+Google ADK executes the workflow graph.
 """,
 )
+
+
+# Backward-compatible alias for docs/tests that still look for
+# the Phase 1 loop symbol. Production routing uses root_agent.
+build_test_review_loop = root_agent
+
+
+runtime_agents = [
+    game_designer,
+    technical_planner,
+    gameplay_developer,
+    playtester,
+    bug_reviewer,
+]
