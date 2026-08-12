@@ -5,7 +5,7 @@ description = "FastAPI wrapper for a Google ADK multi-agent game generation lab.
 requires-python = ">=3.12"
 dependencies = [
     "google-adk==2.6.3",
-    "fastapi==0.125.0",
+    "fastapi>=0.133",
     "python-dotenv==1.2.2",
     "uvicorn==0.38.0",
 ]
