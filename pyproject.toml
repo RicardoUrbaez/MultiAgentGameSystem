@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "lab_app.main:app"
