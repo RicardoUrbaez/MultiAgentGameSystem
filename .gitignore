@@ -1,11 +1,16 @@
 .env
+**/.env
 .venv/
+**/.venv/
 .playwright-mcp/
+**/.playwright-mcp/
 __pycache__/
+**/__pycache__/
 *.pyc
 node_modules/
 dist/
 logs/
+**/logs/
 
 game_workspace/runs/
 game_workspace/**/*.log

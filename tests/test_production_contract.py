@@ -55,6 +55,14 @@ class ProductionContractTests(unittest.TestCase):
                 "create_run_from_phaser_template",
                 return_value=agent.GAME_RUNS_DIR + "/run_20260812_099",
             ),
+            mock.patch.object(
+                agent.build_tools,
+                "npm_install",
+                return_value=mock.Mock(
+                    success=True,
+                    model_dump=lambda: {"success": True},
+                ),
+            ) as install_mock,
         ):
             agent.create_run_workspace(ctx)
 
@@ -62,6 +70,8 @@ class ProductionContractTests(unittest.TestCase):
         self.assertEqual(ctx.state["run_path"], agent.GAME_RUNS_DIR + "/run_20260812_099")
         self.assertEqual(ctx.state["max_iterations"], agent.MAX_ROUTE_ITERATIONS)
         self.assertFalse(ctx.state.get("human_review_required", False))
+        install_mock.assert_called_once_with("run_20260812_099")
+        self.assertTrue(ctx.state[agent.STATE_NPM_INSTALL_RESULT]["success"])
 
     def test_phaser_template_copy_is_deterministic_and_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,12 +153,25 @@ class ProductionContractTests(unittest.TestCase):
         state[agent.STATE_TEST_REPORT] = "OVERALL: FAIL\nDEFECTS:\n1. Reset bug"
         self.assertNotIn("OVERALL: PASS", state[agent.STATE_TEST_REPORT])
 
+    def test_template_hud_accepts_generated_compact_state(self):
+        hud_source = (
+            Path(agent.PHASER_TEMPLATE_DIR)
+            / "src"
+            / "game"
+            / "ui"
+            / "Hud.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("type HudState = Partial<RuntimeState>", hud_source)
+        self.assertIn("isGameOver?: boolean", hud_source)
+        self.assertIn("distance?: number", hud_source)
+        self.assertIn("public update(state: HudState)", hud_source)
+
     def test_role_tool_boundaries_are_enforced(self):
         self.assertIn(agent.filesystem_mcp, agent.gameplay_developer.tools)
         self.assertNotIn(agent.filesystem_mcp, agent.playtester.tools)
         self.assertNotIn(agent.filesystem_mcp, agent.bug_reviewer.tools)
-        self.assertIn(agent.exit_loop, agent.bug_reviewer.tools)
-        self.assertNotIn(agent.exit_loop, agent.playtester.tools)
+        self.assertEqual(agent.bug_reviewer.tools, [])
 
 
 if __name__ == "__main__":

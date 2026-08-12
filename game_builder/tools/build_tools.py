@@ -43,24 +43,37 @@ def _run_npm_command(
     log_path = logs_path / log_filename
 
     command = [_resolve_command(args[0]), *args[1:]]
-    completed = subprocess.run(
-        command,
-        cwd=run_path,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
+    print(f"[BUILD] Starting {' '.join(args)} for {run_id}")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=run_path,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        exit_code = completed.returncode
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+    except subprocess.TimeoutExpired as error:
+        exit_code = 124
+        stdout = error.stdout or ""
+        stderr = (error.stderr or "") + (
+            f"\nCommand timed out after {timeout} seconds."
+        )
+    print(
+        f"[BUILD] Finished {' '.join(args)} for {run_id} "
+        f"with exit code {exit_code}"
     )
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
 
     log_path.write_text(
         "\n".join(
             [
                 f"command: {' '.join(args)}",
-                f"exit_code: {completed.returncode}",
+                f"exit_code: {exit_code}",
                 "",
                 "[stdout]",
                 stdout,
@@ -73,8 +86,8 @@ def _run_npm_command(
     )
 
     return BuildResult(
-        success=completed.returncode == 0,
-        exit_code=completed.returncode,
+        success=exit_code == 0,
+        exit_code=exit_code,
         command=" ".join(args),
         stdout=stdout,
         stderr=stderr,

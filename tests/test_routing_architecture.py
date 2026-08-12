@@ -50,10 +50,7 @@ class RoutingArchitectureTests(unittest.TestCase):
             ["GameplayDeveloper"],
         )
         self.assertEqual(
-            agent.root_agent.graph.get_next_pending_nodes(
-                "GameplayDeveloper",
-                None,
-            ),
+            agent.root_agent.graph.get_next_pending_nodes("GameplayDeveloper", None),
             ["build_gate"],
         )
         self.assertEqual(
@@ -98,10 +95,7 @@ class RoutingArchitectureTests(unittest.TestCase):
             ["GameplayDeveloper"],
         )
         self.assertEqual(
-            agent.root_agent.graph.get_next_pending_nodes(
-                "GameplayDeveloper",
-                None,
-            ),
+            agent.root_agent.graph.get_next_pending_nodes("GameplayDeveloper", None),
             ["build_gate"],
         )
         self.assertEqual(
@@ -145,6 +139,15 @@ class RoutingArchitectureTests(unittest.TestCase):
             ),
             ["human_review"],
         )
+
+    def test_visible_workflow_graph_uses_only_essential_nodes(self):
+        node_names = {node.name for node in agent.root_agent.graph.nodes}
+
+        self.assertNotIn("developer_stage", node_names)
+        self.assertNotIn("build_gate_fallback", node_names)
+        self.assertNotIn("bug_reviewer_fallback", node_names)
+        self.assertNotIn("exit_loop", node_names)
+        self.assertIn("GameplayDeveloper", node_names)
 
     def test_build_gate_records_iteration_and_success_routes_to_playtester(
         self,
@@ -219,27 +222,13 @@ class RoutingArchitectureTests(unittest.TestCase):
             ],
         )
 
-    def test_reviewer_route_callback_preserves_exit_loop_approval(self):
-        class FakeContext:
-            def __init__(self):
-                self.state = {agent.STATE_ROUTE: agent.ROUTE_APPROVE}
-                self.actions = types.SimpleNamespace(route=None)
-
-        ctx = FakeContext()
-
-        self.assertIsNone(agent.record_reviewer_route(ctx))
-        self.assertEqual(ctx.actions.route, agent.ROUTE_APPROVE)
-        self.assertEqual(ctx.state[agent.STATE_WORKFLOW_STATUS], agent.APPROVED)
-
-    def test_only_developer_has_filesystem_and_only_reviewer_has_approval_tool(
+    def test_only_developer_has_filesystem_and_reviewer_uses_no_tools(
         self,
     ):
         self.assertIn(agent.filesystem_mcp, agent.gameplay_developer.tools)
         self.assertNotIn(agent.filesystem_mcp, agent.playtester.tools)
         self.assertNotIn(agent.filesystem_mcp, agent.bug_reviewer.tools)
-        self.assertIn(agent.exit_loop, agent.bug_reviewer.tools)
-        self.assertNotIn(agent.exit_loop, agent.gameplay_developer.tools)
-        self.assertNotIn(agent.exit_loop, agent.playtester.tools)
+        self.assertEqual(agent.bug_reviewer.tools, [])
 
 
 if __name__ == "__main__":

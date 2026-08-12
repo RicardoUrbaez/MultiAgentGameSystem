@@ -115,6 +115,7 @@ def create_run_from_phaser_template(run_id: str) -> Path:
     if run_path.exists():
         raise FileExistsError(f"Run already exists: {run_path}")
 
+    print(f"[WORKSPACE] Copying Phaser template for {run_id}")
     shutil.copytree(
         template_path,
         run_path,
@@ -123,5 +124,6 @@ def create_run_from_phaser_template(run_id: str) -> Path:
     )
     logs_dir = run_path / "logs"
     logs_dir.mkdir(exist_ok=False)
+    print(f"[WORKSPACE] Created isolated run at {run_path}")
 
     return run_path

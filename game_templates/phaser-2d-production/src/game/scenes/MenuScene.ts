@@ -7,6 +7,11 @@ export class MenuScene extends Scene {
 
     public create(): void {
         this.cameras.main.setBackgroundColor('#08111f');
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('autostart') === '1') {
+            this.scene.start('GameScene');
+            return;
+        }
         this.add.text(512, 250, 'Production Phaser Game', {
             fontFamily: 'Trebuchet MS', fontSize: '44px', color: '#eaf6ff'
         }).setOrigin(0.5);

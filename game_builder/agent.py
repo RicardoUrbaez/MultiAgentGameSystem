@@ -1,11 +1,13 @@
 import asyncio
 import os
 import time
+from pathlib import Path
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.context import Context
-from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import START, Workflow
+
+from dotenv import load_dotenv
 
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import (
@@ -22,7 +24,19 @@ from game_builder.tools import build_tools, preview_tools, workspace_tools
 # MODEL
 # =========================================================
 
-MODEL = "gemini-3.1-flash-lite"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(PROJECT_ROOT / "game_builder" / ".env")
+
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+
+
+def get_model_for_agent(agent_name: str, provider: str | None = None):
+    """Return the single supported ADK model for local development."""
+    return GEMINI_MODEL
+
+
+def uses_google_model(agent_name: str, provider: str | None = None) -> bool:
+    return True
 
 
 # =========================================================
@@ -45,7 +59,7 @@ MODEL = "gemini-3.1-flash-lite"
 # It only slows model requests enough for local development.
 # =========================================================
 
-MIN_MODEL_INTERVAL_SECONDS = 5.0
+MIN_MODEL_INTERVAL_SECONDS = 4.0
 
 _model_rate_lock = asyncio.Lock()
 _last_model_call_time = 0.0
@@ -53,13 +67,16 @@ _last_model_call_time = 0.0
 
 async def throttle_model_calls(callback_context, llm_request):
     """
-    Rate-limit Gemini calls across all five ADK LlmAgents.
+    Rate-limit Google/Gemini calls, including fallback model calls.
 
     This callback runs before every actual model invocation,
     including model continuations after tool calls.
     """
 
     global _last_model_call_time
+
+    if not uses_google_model(callback_context.agent_name):
+        return None
 
     async with _model_rate_lock:
         now = time.monotonic()
@@ -86,12 +103,8 @@ async def throttle_model_calls(callback_context, llm_request):
 # PROJECT PATHS
 # =========================================================
 
-PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))
-)
-
 GAME_WORKSPACE = os.path.join(
-    PROJECT_ROOT,
+    str(PROJECT_ROOT),
     "game_workspace"
 )
 
@@ -154,6 +167,12 @@ STATE_DEVELOPER_REVISION_COUNT = "developer_revision_count"
 STATE_REPLAN_COUNT = "replan_count"
 STATE_HUMAN_REVIEW_REQUIRED = "human_review_required"
 STATE_HUMAN_REVIEW_REASON = "human_review_reason"
+STATE_DEMO_MODE = "demo_mode"
+STATE_DEVELOPER_STATUS = "developer_status"
+STATE_DEVELOPER_ERROR = "developer_error"
+STATE_PROGRESS_LOG = "progress_log"
+STATE_STAGE_TIMINGS = "stage_timings"
+STATE_NPM_INSTALL_RESULT = "npm_install_result"
 STATE_RUN_ID_ALIAS = STATE_RUN_ID
 STATE_RUN_PATH_ALIAS = STATE_RUN_PATH
 
@@ -168,8 +187,15 @@ BUILD_ROUTE_FAILED = "BUILD_FAILED"
 APPROVED = "APPROVED"
 WAITING_FOR_HUMAN = "WAITING_FOR_HUMAN"
 
-MAX_ROUTE_ITERATIONS = 3
+MAX_ROUTE_ITERATIONS = 2
 MAX_REPEATED_FAILURES = 2
+DESIGNER_TIMEOUT_SECONDS = 45.0
+PLANNER_TIMEOUT_SECONDS = 45.0
+DEVELOPER_TIMEOUT_SECONDS = 150.0
+PLAYTESTER_TIMEOUT_SECONDS = 75.0
+REVIEWER_TIMEOUT_SECONDS = 45.0
+FILESYSTEM_MCP_TIMEOUT_SECONDS = 20.0
+PLAYWRIGHT_MCP_TIMEOUT_SECONDS = 30.0
 
 VALID_REVIEW_ROUTES = {
     ROUTE_APPROVE,
@@ -248,6 +274,76 @@ def record_route_state(state, route: str) -> None:
     state[STATE_ROUTE] = route
     state[STATE_CURRENT_ROUTE] = route
     state[STATE_ROUTE_HISTORY] = history
+
+
+def record_progress(state, stage: str, message: str) -> None:
+    progress = list(state.get(STATE_PROGRESS_LOG, []) or [])
+    progress.append(
+        {
+            "stage": stage,
+            "message": message,
+            "timestamp": time.time(),
+        }
+    )
+    state[STATE_PROGRESS_LOG] = progress[-100:]
+    print(f"[{stage}] {message}")
+
+
+def start_stage(state, stage: str) -> None:
+    timings = dict(state.get(STATE_STAGE_TIMINGS, {}) or {})
+    timings[stage] = time.monotonic()
+    state[STATE_STAGE_TIMINGS] = timings
+    record_progress(state, stage, "START")
+
+
+def finish_stage(state, stage: str, status: str = "END") -> None:
+    timings = dict(state.get(STATE_STAGE_TIMINGS, {}) or {})
+    started_at = timings.pop(stage, None)
+    state[STATE_STAGE_TIMINGS] = timings
+    elapsed = "" if started_at is None else f" ({time.monotonic() - started_at:.2f}s)"
+    record_progress(state, stage, f"{status}{elapsed}")
+
+
+def designer_before_agent(callback_context: Context):
+    start_stage(callback_context.state, "DESIGNER")
+    return None
+
+
+def designer_after_agent(callback_context: Context):
+    finish_stage(callback_context.state, "DESIGNER")
+    return None
+
+
+def planner_before_agent(callback_context: Context):
+    start_stage(callback_context.state, "PLANNER")
+    return None
+
+
+def planner_after_agent(callback_context: Context):
+    finish_stage(callback_context.state, "PLANNER")
+    return None
+
+
+def playtester_before_agent(callback_context: Context):
+    start_stage(callback_context.state, "PLAYTESTER")
+    return None
+
+
+def playtester_after_agent(callback_context: Context):
+    record_test_report(callback_context)
+    finish_stage(callback_context.state, "PLAYTESTER")
+    return None
+
+
+def reviewer_before_agent(callback_context: Context):
+    start_stage(callback_context.state, "REVIEWER")
+    return None
+
+
+def reviewer_after_agent(callback_context: Context):
+    record_reviewer_route(callback_context)
+    finish_stage(callback_context.state, "REVIEWER")
+    return None
 
 
 def _coerce_review_decision(review_feedback: str) -> ReviewDecision:
@@ -363,6 +459,14 @@ def record_reviewer_route(callback_context: Context):
         decision.reasoning = "Approval blocked: fresh passing build and browser evidence are required. " + decision.reasoning
         decision.required_changes.append("Provide fresh passing TestBridge browser evidence for this iteration.")
         route = ROUTE_REVISE_DEVELOPER
+    if route == ROUTE_REVISE_DEVELOPER:
+        state[STATE_DEVELOPER_REVISION_COUNT] = int(
+            state.get(STATE_DEVELOPER_REVISION_COUNT, 0) or 0
+        ) + 1
+    elif route == ROUTE_REPLAN:
+        state[STATE_REPLAN_COUNT] = int(
+            state.get(STATE_REPLAN_COUNT, 0) or 0
+        ) + 1
     state[STATE_REVIEW_DECISION] = decision.model_dump()
     state[STATE_REVIEW_FEEDBACK] = review_feedback
     state[STATE_CURRENT_ROUTE] = route
@@ -435,6 +539,7 @@ def create_run_workspace(ctx: Context):
     state.setdefault(STATE_HUMAN_REVIEW_REQUIRED, False)
     state.setdefault(STATE_HUMAN_REVIEW_REASON, "")
     state.setdefault(STATE_APPROVAL_STATUS, "PENDING")
+    state.setdefault(STATE_DEMO_MODE, False)
 
     existing_run_id = state.get(STATE_CURRENT_RUN_ID) or state.get(STATE_RUN_ID)
     if existing_run_id:
@@ -443,10 +548,25 @@ def create_run_workspace(ctx: Context):
         state[STATE_RUN_ID] = str(existing_run_id)
         state[STATE_CURRENT_RUN_PATH] = str(existing_run_path)
         state[STATE_RUN_PATH] = str(existing_run_path)
+        record_progress(
+            state,
+            "WORKSPACE",
+            f"Reusing deterministic run workspace {existing_run_id}.",
+        )
         return "RUN_WORKSPACE_EXISTS"
 
     run_id = workspace_tools.create_next_run_id()
+    record_progress(state, "WORKSPACE", f"Creating run workspace {run_id}.")
     run_path = workspace_tools.create_run_from_phaser_template(run_id)
+    start_stage(state, "DEPENDENCIES")
+    install_result = build_tools.npm_install(run_id)
+    finish_stage(state, "DEPENDENCIES")
+    state[STATE_NPM_INSTALL_RESULT] = install_result.model_dump()
+    if not install_result.success:
+        raise RuntimeError(
+            "Dependency installation failed for the generated run: "
+            f"{install_result.stderr[-1000:]}"
+        )
     manifest = _default_manifest_from_state(state)
 
     state[STATE_CURRENT_RUN_ID] = run_id
@@ -457,6 +577,7 @@ def create_run_workspace(ctx: Context):
     state[STATE_PREVIEW_PORT] = DEFAULT_PREVIEW_PORT
     state[STATE_MAX_ITERATIONS] = MAX_ROUTE_ITERATIONS
     state[STATE_APPROVAL_STATUS] = "PENDING"
+    record_progress(state, "WORKSPACE", f"Template copy completed for {run_id}.")
 
     return "RUN_WORKSPACE_CREATED"
 
@@ -498,7 +619,9 @@ def build_gate(ctx: Context):
         ctx.route = BUILD_ROUTE_FAILED
         return "BUILD_GATE_FAIL"
 
+    start_stage(ctx.state, "TYPECHECK")
     typecheck_result = build_tools.npm_typecheck(run_id)
+    finish_stage(ctx.state, "TYPECHECK")
     ctx.state[STATE_TYPECHECK_RESULT] = typecheck_result.model_dump()
 
     if not typecheck_result.success:
@@ -530,9 +653,13 @@ def build_gate(ctx: Context):
             f"iteration {iteration_count}.\n\n{output[-2000:]}"
         )
         ctx.route = BUILD_ROUTE_FAILED
+        record_progress(ctx.state, "TYPECHECK", "FAILED; preview skipped.")
         return "BUILD_GATE_FAIL"
 
+    record_progress(ctx.state, "TYPECHECK", "PASSED")
+    start_stage(ctx.state, "BUILD")
     result = build_tools.npm_build(run_id)
+    finish_stage(ctx.state, "BUILD")
 
     output = "\n".join(
         str(part).strip()
@@ -559,8 +686,26 @@ def build_gate(ctx: Context):
 
     if result.success:
         port = int(ctx.state.get(STATE_PREVIEW_PORT, DEFAULT_PREVIEW_PORT))
-        preview_url = preview_tools.start_preview(run_id, port)
+        start_stage(ctx.state, "PREVIEW")
+        try:
+            preview_url = preview_tools.start_preview(run_id, port)
+        except (RuntimeError, TimeoutError, OSError) as error:
+            reason = f"Preview startup failed: {error}"
+            build_record["success"] = False
+            build_record["status"] = BUILD_ROUTE_FAILED
+            build_record["preview_error"] = reason
+            ctx.state[STATE_BUILD_RESULT] = build_record
+            ctx.state[STATE_BUILD_GATE] = build_record
+            ctx.state[STATE_TEST_REPORT] = (
+                "OVERALL: FAIL\nPAGE_LOAD: NOT_RUN\n"
+                f"RUNTIME_ERRORS: PREVIEW_STARTUP_FAILED\nDEFECTS:\n1. {reason}"
+            )
+            record_progress(ctx.state, "PREVIEW", reason)
+            finish_stage(ctx.state, "PREVIEW", "FAILED")
+            ctx.route = BUILD_ROUTE_FAILED
+            return "BUILD_GATE_FAIL"
         ctx.state[STATE_PREVIEW_URL] = preview_url
+        finish_stage(ctx.state, "PREVIEW", "READY")
         ctx.route = BUILD_ROUTE_SUCCESS
         return "BUILD_GATE_PASS"
 
@@ -576,7 +721,21 @@ def build_gate(ctx: Context):
         f"{iteration_count}.\n\n{output[-2000:]}"
     )
     ctx.route = BUILD_ROUTE_FAILED
+    record_progress(ctx.state, "BUILD", "FAILED; preview skipped.")
     return "BUILD_GATE_FAIL"
+
+
+def developer_before_agent(callback_context: Context):
+    callback_context.state[STATE_DEVELOPER_STATUS] = "RUNNING"
+    callback_context.state[STATE_DEVELOPER_ERROR] = ""
+    start_stage(callback_context.state, "DEVELOPER")
+    return None
+
+
+def developer_after_agent(callback_context: Context):
+    callback_context.state[STATE_DEVELOPER_STATUS] = "COMPLETED"
+    finish_stage(callback_context.state, "DEVELOPER")
+    return None
 
 
 def finalize_run(ctx: Context):
@@ -587,6 +746,7 @@ def finalize_run(ctx: Context):
 
 def human_review(ctx: Context):
     ctx.state[STATE_WORKFLOW_STATUS] = WAITING_FOR_HUMAN
+    ctx.state[STATE_HUMAN_REVIEW_REQUIRED] = True
     ctx.route = ROUTE_HUMAN_REVIEW
     return "WAITING_FOR_HUMAN"
 
@@ -619,6 +779,7 @@ filesystem_mcp = McpToolset(
                 GAME_RUNS_DIR,
             ],
         ),
+        timeout=FILESYSTEM_MCP_TIMEOUT_SECONDS,
     ),
     tool_filter=[
         "read_text_file",
@@ -665,6 +826,7 @@ playwright_mcp = McpToolset(
                 "1280x800",
             ],
         ),
+        timeout=PLAYWRIGHT_MCP_TIMEOUT_SECONDS,
     ),
     tool_filter=[
         "browser_navigate",
@@ -674,52 +836,17 @@ playwright_mcp = McpToolset(
 
 
 # =========================================================
-# REAL LOOP EXIT TOOL
-# =========================================================
-#
-# ONLY BugReviewer receives this tool.
-#
-# Developer cannot approve itself.
-# Playtester cannot approve the game.
-#
-# Reviewer alone controls approval.
-# =========================================================
-
-def exit_loop(tool_context: ToolContext):
-    """
-    Signal approval after independent browser testing passes
-    and BugReviewer approves.
-    """
-
-    print(
-        f"[TOOL] exit_loop called by "
-        f"{tool_context.agent_name}"
-    )
-
-    tool_context.actions.escalate = True
-    tool_context.actions.skip_summarization = True
-    tool_context.actions.route = ROUTE_APPROVE
-    record_route_state(tool_context.state, ROUTE_APPROVE)
-    tool_context.state[STATE_WORKFLOW_STATUS] = APPROVED
-
-    return {
-        "status": "APPROVED",
-        "reason": (
-            "Independent browser testing passed and "
-            "BugReviewer approved the implementation."
-        ),
-    }
-
-
-# =========================================================
 # AGENT 1 — GAME DESIGNER
 # =========================================================
 
 game_designer = LlmAgent(
     name="GameDesigner",
-    model=MODEL,
+    model=get_model_for_agent("GameDesigner"),
 
     before_model_callback=throttle_model_calls,
+    before_agent_callback=designer_before_agent,
+    after_agent_callback=designer_after_agent,
+    timeout=DESIGNER_TIMEOUT_SECONDS,
 
     instruction="""
 You are the Game Designer.
@@ -763,9 +890,12 @@ Output only the game design.
 
 technical_planner = LlmAgent(
     name="TechnicalPlanner",
-    model=MODEL,
+    model=get_model_for_agent("TechnicalPlanner"),
 
     before_model_callback=throttle_model_calls,
+    before_agent_callback=planner_before_agent,
+    after_agent_callback=planner_after_agent,
+    timeout=PLANNER_TIMEOUT_SECONDS,
 
     include_contents="none",
 
@@ -788,13 +918,13 @@ The deterministic runtime will create:
 game_workspace/runs/<current_run_id>/
 
 The implementation should edit project files inside that active
-run only, usually:
+run only, normally:
 
-- src/game/scenes/Game.ts
-- src/game/scenes/MainMenu.ts
-- src/game/scenes/GameOver.ts
-- src/game/main.ts
-- public/style.css
+- src/game/scenes/GameScene.ts
+
+Only add one genre-specific helper or small manifest-specific config file
+when the game cannot fit in GameScene.ts. Do not plan changes to reusable
+scenes, systems, Phaser configuration, or styles.
 
 Do not plan edits to game_templates/phaser-2d.
 Do not choose another engine.
@@ -894,9 +1024,12 @@ Output only the technical plan.
 
 gameplay_developer = LlmAgent(
     name="GameplayDeveloper",
-    model=MODEL,
+    model=get_model_for_agent("GameplayDeveloper"),
 
     before_model_callback=throttle_model_calls,
+    before_agent_callback=developer_before_agent,
+    after_agent_callback=developer_after_agent,
+    timeout=DEVELOPER_TIMEOUT_SECONDS,
 
     include_contents="none",
 
@@ -915,6 +1048,10 @@ LATEST REVIEW FEEDBACK:
 
 {{review_decision?}}
 
+DEMO MODE:
+
+{{demo_mode?}}
+
 You have access to a REAL filesystem through Model Context
 Protocol.
 
@@ -926,14 +1063,17 @@ The Filesystem MCP root is scoped to:
 
 {GAME_RUNS_DIR}
 
-Use run-relative paths such as:
+Use this primary run-relative path:
 
-{{current_run_id}}/src/game/scenes/Game.ts
-{{current_run_id}}/src/game/scenes/MainMenu.ts
-{{current_run_id}}/src/game/scenes/GameOver.ts
-{{current_run_id}}/public/style.css
+{{current_run_id}}/src/game/scenes/GameScene.ts
 
 Do not read or write game_templates/phaser-2d.
+
+The deterministic workspace tool has already copied the complete Phaser
+production template and installed its dependencies before this stage. Never
+copy, scaffold, reinstall, or regenerate a project through MCP. Keep each
+turn to one game-specific source file by default, and never edit more than
+three files in a turn.
 
 The run begins from the reusable production template, including:
 
@@ -955,7 +1095,16 @@ If LATEST REVIEW FEEDBACK is empty:
 Create the first implementation.
 
 Use the existing Phaser project inside the active run.
-Call write_file for the TypeScript/CSS files that must change.
+Read GameScene.ts once, then make one complete write_file replacement for it.
+Only add a second or third complete-file write when the technical plan makes
+that genuinely necessary.
+
+If DEMO MODE is true on this first implementation only, deliberately
+omit or break one TestBridge behavior in the generated run so that the
+real Playwright MCP test observes a controlled failure. This is a
+non-production demonstration fixture, not fabricated evidence. On the
+next REVISE_DEVELOPER turn, repair that exact defect before doing any
+other work. Never enable this behavior unless DEMO MODE is true.
 
 ============================================================
 REVISION
@@ -971,15 +1120,10 @@ REPLAN
 
 then this is a revision cycle.
 
-First call read_text_file on:
-
-the active run files you need to repair.
-
-Study the existing implementation.
-
-Then fix EVERY defect identified by BugReviewer.
-
-Call write_file for the corrected complete files.
+First call read_text_file once for GameScene.ts, unless the review identifies
+one optional helper as the defect source. Then write one corrected complete
+file replacement. Do not make incremental edits or repeated reads. Fix every
+evidence-supported BugReviewer defect in that focused replacement.
 
 ============================================================
 GAME REQUIREMENTS
@@ -1002,11 +1146,26 @@ It must contain:
 - visible title
 - visible instructions
 - actual playable game
+- prompt-specific visuals and mechanics, not the generic template scene
 - working controls
 - scoring where applicable
 - win/loss behavior
 - restart functionality
 - clear game state
+
+Do not leave the generated game looking like the default Phaser template.
+If the template MenuScene is present, update its title and instructions so it
+matches the generated game. Do not leave "Production Phaser Game" or generic
+template instructions in the delivered output.
+Replace placeholder-only gameplay with visuals and rules that make the
+requested genre obvious in the first playable screen. For example, a car
+dodging prompt must show a road or lanes, a player vehicle, traffic vehicles,
+distance/score, collision game over, and restart behavior.
+
+Placeholder assets may be used only when they are recontextualized with
+code-drawn shapes, labels, layout, or scene composition that clearly matches
+the requested game. A grid background plus placeholder-player and
+placeholder-enemy alone is not acceptable.
 
 ============================================================
 MANDATORY TEST INTERFACE
@@ -1031,6 +1190,15 @@ triggerWin, and triggerLoss.
 getState() must return REAL current game state.
 
 Do not return hard-coded fake test values.
+
+TypeScript must pass with strict checks.
+
+When using Phaser keyboard input, guard nullable keyboard access with
+this.input.keyboard?.on(...) or an explicit if (!this.input.keyboard) return.
+
+The TestBridge accepts JSON-serializable snapshots. Do not force generated
+state into the template RuntimeState shape unless you provide every required
+field.
 
 For Pong, expose at minimum:
 
@@ -1078,8 +1246,6 @@ and one or two sentences describing what was created/fixed.
 
 Do NOT output entire source files as your final message.
 
-Do NOT call exit_loop.
-
 Only BugReviewer may approve the game.
 """,
 
@@ -1125,10 +1291,12 @@ Only BugReviewer may approve the game.
 
 playtester = LlmAgent(
     name="Playtester",
-    model=MODEL,
+    model=get_model_for_agent("Playtester"),
 
     before_model_callback=throttle_model_calls,
-    after_agent_callback=record_test_report,
+    before_agent_callback=playtester_before_agent,
+    after_agent_callback=playtester_after_agent,
+    timeout=PLAYTESTER_TIMEOUT_SECONDS,
 
     include_contents="none",
 
@@ -1198,6 +1366,10 @@ It should inspect:
 
 3. whether the visible game UI exists
 
+3a. whether the first playable screen visibly matches the Game Design
+instead of the untouched Phaser template. Inspect visible text, canvas
+content, and test state keys for prompt-specific evidence.
+
 4. whether window.__GAME_TEST__ exists
 
 5. whether getState is a function
@@ -1262,6 +1434,11 @@ only if:
 - controls cause plausible state changes where applicable
 - reset returns the game to a sensible initial state
 - implementation reasonably matches the Game Design
+- the first playable screen is not merely the default template with
+placeholder-player, placeholder-enemy, and placeholder-tile
+- requested theme-specific mechanics are visible or reflected in real state
+keys. For a car dodging request, expect lane/playerLane, traffic/enemies,
+score or distance, running/gameOver, and visible road/car/traffic cues.
 
 Otherwise return:
 
@@ -1322,10 +1499,12 @@ Never claim a test passed without browser evidence.
 
 bug_reviewer = LlmAgent(
     name="BugReviewer",
-    model=MODEL,
+    model=get_model_for_agent("BugReviewer"),
 
     before_model_callback=throttle_model_calls,
-    after_agent_callback=record_reviewer_route,
+    before_agent_callback=reviewer_before_agent,
+    after_agent_callback=reviewer_after_agent,
+    timeout=REVIEWER_TIMEOUT_SECONDS,
 
     include_contents="none",
 
@@ -1352,7 +1531,9 @@ BUILD RESULT:
 
 {build_result?}
 
-Evaluate the Playtester's evidence.
+Evaluate the Playtester's evidence once and make exactly one routing decision
+from this completed report. Do not request cosmetic follow-up work when the
+evidence passes.
 
 You alone control production routing.
 
@@ -1377,9 +1558,7 @@ for the current iteration, and no critical defects.
 
 If the game passes:
 
-Call exit_loop.
-
-Then begin your final answer with:
+Begin your final answer with:
 
 APPROVE
 
@@ -1391,8 +1570,6 @@ REVISE_DEVELOPER
 
 If browser evidence shows implementation defects that the
 current technical plan can still support:
-
-Do NOT call exit_loop.
 
 Return exactly this routing label first:
 
@@ -1418,8 +1595,7 @@ REPLAN
 ============================================================
 
 If the test/build evidence shows the implementation plan is
-wrong, incomplete, or missing acceptance criteria, do NOT call
-exit_loop.
+wrong, incomplete, or missing acceptance criteria:
 
 Return exactly this routing label first:
 
@@ -1433,7 +1609,7 @@ HUMAN_REVIEW
 ============================================================
 
 If failures are repeated, unrecoverable, blocked by the runtime,
-or unsafe to continue autonomously, do NOT call exit_loop.
+or unsafe to continue autonomously:
 
 Return exactly this routing label first:
 
@@ -1446,10 +1622,6 @@ Then explain what a human must inspect.
         "Independently evaluates browser-test evidence and "
         "controls whether the workflow revises or exits."
     ),
-
-    tools=[
-        exit_loop,
-    ],
 
     output_key=STATE_REVIEW_FEEDBACK,
 )
@@ -1480,8 +1652,8 @@ Then explain what a human must inspect.
 #   -> GameplayDeveloper -> build_gate -> Playtester -> BugReviewer
 #
 # REPLAN
-#   -> TechnicalPlanner -> create_run_workspace -> GameplayDeveloper
-#      -> build_gate -> Playtester -> BugReviewer
+#   -> TechnicalPlanner -> GameplayDeveloper -> build_gate
+#      -> Playtester -> BugReviewer
 #
 # HUMAN_REVIEW
 #   -> human_review
@@ -1500,6 +1672,9 @@ root_agent = Workflow(
             create_run_workspace,
             technical_planner,
             gameplay_developer,
+            build_gate,
+        ),
+        (
             build_gate,
             {
                 BUILD_ROUTE_SUCCESS: playtester,

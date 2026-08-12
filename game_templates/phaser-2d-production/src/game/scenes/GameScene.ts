@@ -1,4 +1,4 @@
-import { GameObjects, Scene } from 'phaser';
+import { GameObjects, Math as PhaserMath, Scene } from 'phaser';
 import { Hud } from '../ui/Hud';
 import { createInitialState, EntityState, RuntimeState } from '../state/GameState';
 import { AudioSystem } from '../systems/AudioSystem';
@@ -49,8 +49,8 @@ export class GameScene extends Scene {
         }
         const movement = this.inputSystem.getMovement();
         const speed = 0.26 * delta;
-        this.state.player.x = Phaser.Math.Clamp(this.state.player.x + movement.x * speed, 24, 1000);
-        this.state.player.y = Phaser.Math.Clamp(this.state.player.y + movement.y * speed, 112, 744);
+        this.state.player.x = PhaserMath.Clamp(this.state.player.x + movement.x * speed, 24, 1000);
+        this.state.player.y = PhaserMath.Clamp(this.state.player.y + movement.y * speed, 112, 744);
         this.player.setPosition(this.state.player.x, this.state.player.y);
         if (this.inputSystem.actionPressed) {
             this.scorePoint(1);
@@ -119,14 +119,14 @@ export class GameScene extends Scene {
 
     private spawnEnemy(): void {
         const id = `enemy-${this.state.enemies.length + 1}`;
-        const entity: EntityState = { id, type: 'enemy', x: Phaser.Math.Between(80, 944), y: Phaser.Math.Between(150, 680), active: true };
+        const entity: EntityState = { id, type: 'enemy', x: PhaserMath.Between(80, 944), y: PhaserMath.Between(150, 680), active: true };
         this.state.enemies.push(entity);
         this.enemySprites.set(id, this.add.image(entity.x, entity.y, 'placeholder-enemy'));
     }
 
     private teleportPlayer(x: number, y: number): void {
-        this.state.player.x = Phaser.Math.Clamp(x, 24, 1000);
-        this.state.player.y = Phaser.Math.Clamp(y, 112, 744);
+        this.state.player.x = PhaserMath.Clamp(x, 24, 1000);
+        this.state.player.y = PhaserMath.Clamp(y, 112, 744);
         this.player.setPosition(this.state.player.x, this.state.player.y);
     }
 

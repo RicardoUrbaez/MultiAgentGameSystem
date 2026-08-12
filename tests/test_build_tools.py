@@ -110,6 +110,48 @@ class BuildToolsTests(unittest.TestCase):
                     "",
                 )
 
+    def test_timed_out_subprocess_returns_failure_result_and_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_path = Path(tmp)
+            timeout_error = build_tools.subprocess.TimeoutExpired(
+                cmd=["npm", "run", "build-nolog"],
+                timeout=1,
+                output="partial output",
+                stderr="still running",
+            )
+
+            with (
+                mock.patch.object(
+                    build_tools,
+                    "get_run_path",
+                    return_value=run_path,
+                ),
+                mock.patch.object(
+                    build_tools,
+                    "_resolve_command",
+                    side_effect=lambda value: value,
+                ),
+                mock.patch.object(
+                    build_tools.subprocess,
+                    "run",
+                    side_effect=timeout_error,
+                ),
+            ):
+                result = build_tools._run_npm_command(
+                    "run_20260812_001",
+                    ["npm", "run", "build-nolog"],
+                    "build.log",
+                    timeout=1,
+                )
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.exit_code, 124)
+            self.assertIn("timed out after 1 seconds", result.stderr)
+            self.assertIn(
+                "timed out after 1 seconds",
+                (run_path / "logs" / "build.log").read_text(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

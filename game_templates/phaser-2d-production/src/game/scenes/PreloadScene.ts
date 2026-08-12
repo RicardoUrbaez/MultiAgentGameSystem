@@ -18,7 +18,7 @@ export class PreloadScene extends Scene {
         const bar = this.add.rectangle(512, 384, 0, 12, 0x72f1b8).setOrigin(0, 0.5);
         this.load.on('progress', (value: number) => bar.width = 360 * value);
         for (const [key, path] of ASSETS) {
-            this.load.image(key, path);
+            this.load.svg(key, path);
         }
     }
 

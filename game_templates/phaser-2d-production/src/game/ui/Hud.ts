@@ -1,6 +1,11 @@
 import { GameObjects, Scene } from 'phaser';
 import { RuntimeState } from '../state/GameState';
 
+type HudState = Partial<RuntimeState> & {
+    isGameOver?: boolean;
+    distance?: number;
+};
+
 export class Hud {
     private readonly scoreText: GameObjects.Text;
     private readonly objectiveText: GameObjects.Text;
@@ -13,9 +18,17 @@ export class Hud {
         this.statusText = scene.add.text(20, 70, '', { ...style, color: '#72f1b8' }).setScrollFactor(0);
     }
 
-    public update(state: RuntimeState): void {
-        this.scoreText.setText(`Score ${state.score}   Lives ${state.lives}   Level ${state.level}`);
-        this.objectiveText.setText(`Objective ${state.objectiveProgress}/${state.objectiveTarget}`);
-        this.statusText.setText(state.gameOver ? `${state.winner ?? 'Game over'} - press R to restart` : state.paused ? 'Paused - press Esc to resume' : 'Active');
+    public update(state: HudState): void {
+        const score = state.score ?? state.distance ?? 0;
+        const lives = state.lives ?? 1;
+        const level = state.level ?? 1;
+        const objectiveProgress = state.objectiveProgress ?? 0;
+        const objectiveTarget = state.objectiveTarget ?? 0;
+        const gameOver = state.gameOver ?? state.isGameOver ?? false;
+        const paused = state.paused ?? false;
+
+        this.scoreText.setText(`Score ${score}   Lives ${lives}   Level ${level}`);
+        this.objectiveText.setText(objectiveTarget > 0 ? `Objective ${objectiveProgress}/${objectiveTarget}` : '');
+        this.statusText.setText(gameOver ? `${state.winner ?? 'Game over'} - press R to restart` : paused ? 'Paused - press Esc to resume' : 'Active');
     }
 }

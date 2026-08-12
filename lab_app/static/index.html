@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agentic Game Lab</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="lab-shell">
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">AG</div>
+        <div>
+          <h1>Agentic Game Lab</h1>
+          <p>ADK workflow output hub</p>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button id="refresh-button" class="button secondary" type="button">Refresh</button>
+        <a id="open-link" class="button secondary disabled" target="_blank" rel="noreferrer">Open</a>
+        <a id="download-link" class="button disabled">Download ZIP</a>
+        <div class="system-status" aria-live="polite">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Checking runs</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="build-panel" aria-label="Build controls">
+      <div class="panel-title">
+        <span class="section-label">Build</span>
+        <span class="code-chip">&lt;/&gt;</span>
+      </div>
+
+      <form id="build-form" class="build-form">
+        <label for="prompt">Game idea</label>
+        <textarea id="prompt" maxlength="4000">Build a simple top-down car dodging game where the player moves left and right to avoid traffic. Add score based on distance survived, collision game over, and a restart button.</textarea>
+        <div class="prompt-footer">
+          <span id="prompt-count">0/4000</span>
+          <label class="toggle-row" for="demo-mode">
+            <input id="demo-mode" type="checkbox" />
+            <span>Demo mode</span>
+          </label>
+        </div>
+        <button class="button primary build-submit" type="submit">Build Game</button>
+      </form>
+
+      <div class="quick-prompts" aria-label="Prompt presets">
+        <button type="button" data-prompt="Build a simple top-down car dodging game where the player moves left and right to avoid traffic. Add score based on distance survived, collision game over, and a restart button.">Car dodge</button>
+        <button type="button" data-prompt="Build a compact arcade pong game with keyboard controls, score to five, increasing ball speed, and a restart button.">Pong</button>
+        <button type="button" data-prompt="Build a tiny maze escape game where the player collects keys, avoids traps, reaches an exit, and can restart after winning or losing.">Maze</button>
+      </div>
+
+      <section class="agent-list" aria-label="Five ADK Agents">
+        <div class="panel-title">
+          <span class="section-label">Five ADK Agents</span>
+        </div>
+        <ol id="agent-list">
+          <li><span>1</span><strong>GameDesigner</strong><em>Ready</em></li>
+          <li><span>2</span><strong>TechnicalPlanner</strong><em>Ready</em></li>
+          <li><span>3</span><strong>GameplayDeveloper</strong><em>Ready</em></li>
+          <li><span>4</span><strong>Playtester</strong><em>Ready</em></li>
+          <li><span>5</span><strong>BugReviewer</strong><em>Ready</em></li>
+        </ol>
+      </section>
+    </section>
+
+    <section class="main-stage" aria-label="Generated game preview">
+      <div class="stage-top">
+        <div>
+          <span class="section-label">Current Output</span>
+          <h2 id="run-title">No run selected</h2>
+        </div>
+        <div class="run-meta">
+          <span id="run-id">No run selected</span>
+          <span id="run-updated"></span>
+        </div>
+      </div>
+
+      <div class="workflow-rail" id="workflow-rail" aria-label="ADK workflow">
+        <div><span>1</span><strong>GameDesigner</strong><em>Ready</em></div>
+        <div><span>2</span><strong>TechnicalPlanner</strong><em>Ready</em></div>
+        <div><span>3</span><strong>GameplayDeveloper</strong><em>Ready</em></div>
+        <div><span>4</span><strong>Playtester</strong><em>Ready</em></div>
+        <div><span>5</span><strong>BugReviewer</strong><em>Ready</em></div>
+      </div>
+
+      <div class="preview-frame">
+        <iframe id="game-frame" title="Generated game preview"></iframe>
+        <div id="empty-state" class="empty-state">
+          <h3>No run selected</h3>
+          <p>Ready output appears here.</p>
+        </div>
+      </div>
+    </section>
+
+    <aside class="details-panel" aria-label="Run details">
+      <section class="latest-card">
+        <div class="panel-title">
+          <span class="section-label">Latest Run</span>
+        </div>
+        <dl>
+          <div>
+            <dt>Run ID</dt>
+            <dd id="detail-run-id">None</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="detail-status">Waiting</dd>
+          </div>
+          <div>
+            <dt>Agent</dt>
+            <dd id="detail-agent">-</dd>
+          </div>
+          <div>
+            <dt>Stage</dt>
+            <dd id="detail-stage">-</dd>
+          </div>
+          <div>
+            <dt>Updated</dt>
+            <dd id="detail-updated">-</dd>
+          </div>
+          <div>
+            <dt>Output</dt>
+            <dd id="detail-output">-</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="evidence-card">
+        <div class="panel-title">
+          <span class="section-label">Evidence / Status</span>
+        </div>
+        <ul id="evidence-list">
+          <li><span></span>GameDesigner <em>Waiting</em></li>
+          <li><span></span>TechnicalPlanner <em>Waiting</em></li>
+          <li><span></span>GameplayDeveloper <em>Waiting</em></li>
+          <li><span></span>Playtester <em>Waiting</em></li>
+          <li><span></span>BugReviewer <em>Waiting</em></li>
+        </ul>
+      </section>
+
+      <section class="flow-card">
+        <div class="panel-title">
+          <span class="section-label">ADK Flow</span>
+        </div>
+        <div id="adk-flow" class="adk-flow" aria-label="Google ADK agent workflow chart"></div>
+      </section>
+    </aside>
+
+    <section class="runs-panel" aria-label="Generated runs">
+      <div class="panel-title runs-title">
+        <div>
+          <span class="section-label">Runs</span>
+          <h2>Generated outputs</h2>
+        </div>
+        <div class="run-counts">
+          <span id="ready-count">0 ready</span>
+          <span id="total-count">0 total</span>
+        </div>
+      </div>
+      <div class="runs-table">
+        <div class="runs-head" aria-hidden="true">
+          <span>Run ID</span>
+          <span>Status</span>
+          <span>Updated</span>
+          <span>Output</span>
+        </div>
+        <div id="runs-list" class="runs-list"></div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
