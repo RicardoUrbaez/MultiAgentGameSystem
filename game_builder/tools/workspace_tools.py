@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PHASER_TEMPLATE_DIR = PROJECT_ROOT / "game_templates" / "phaser-2d"
+PHASER_TEMPLATE_DIR = PROJECT_ROOT / "game_templates" / "phaser-2d-production"
 GAME_WORKSPACE = PROJECT_ROOT / "game_workspace"
 RUNS_DIR = GAME_WORKSPACE / "runs"
 

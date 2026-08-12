@@ -14,7 +14,7 @@ from google.adk.tools.mcp_tool.mcp_session_manager import (
 
 from mcp import StdioServerParameters
 
-from game_builder.schemas import GameManifest, ReviewDecision
+from game_builder.schemas import GameManifest, ReviewDecision, TestReport
 from game_builder.tools import build_tools, preview_tools, workspace_tools
 
 
@@ -127,6 +127,7 @@ STATE_GAME_MANIFEST = "game_manifest"
 STATE_TECHNICAL_PLAN = "technical_plan"
 STATE_BUILD_SUMMARY = "build_summary"
 STATE_TEST_REPORT = "test_report"
+STATE_STRUCTURED_TEST_REPORT = "structured_test_report"
 STATE_REVIEW_DECISION = "review_decision"
 STATE_REVIEW_FEEDBACK = STATE_REVIEW_DECISION
 STATE_CURRENT_RUN_ID = "current_run_id"
@@ -274,11 +275,14 @@ def _coerce_review_decision(review_feedback: str) -> ReviewDecision:
             required_changes.append(clean)
     if not defects and "defect" in feedback.lower():
         defects.append(feedback)
-    score = (
-        90 if route == ROUTE_APPROVE
-        else 75 if route == ROUTE_REVISE_DEVELOPER
-        else 65 if route == ROUTE_REPLAN
-        else 40
+    score = next(
+        (
+            int(line.split(":", 1)[1].strip())
+            for line in feedback.splitlines()
+            if line.upper().startswith("SCORE:")
+            and line.split(":", 1)[1].strip().isdigit()
+        ),
+        90 if route == ROUTE_APPROVE else 75 if route == ROUTE_REVISE_DEVELOPER else 65 if route == ROUTE_REPLAN else 40,
     )
     return ReviewDecision(
         route=route,
@@ -286,6 +290,51 @@ def _coerce_review_decision(review_feedback: str) -> ReviewDecision:
         reasoning=feedback or "No review reasoning supplied.",
         defects=defects,
         required_changes=required_changes,
+    )
+
+
+def _report_status(text: str, category: str) -> str:
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.upper().startswith(f"{category}:"):
+            value = line.split(":", 1)[1].strip().upper()
+            return "FAIL" if "FAIL" in value else "PASS" if "PASS" in value else "NOT_RUN"
+    return "NOT_RUN"
+
+
+def record_test_report(callback_context: Context):
+    raw_report = str(callback_context.state.get(STATE_TEST_REPORT, ""))
+    iteration = int(callback_context.state.get(STATE_ITERATION_COUNT, 0) or 0)
+    report = TestReport(
+        build="PASS" if callback_context.state.get(STATE_BUILD_RESULT, {}).get("success") else "FAIL",
+        page_load=_report_status(raw_report, "PAGE_LOAD"),
+        console=_report_status(raw_report, "CONSOLE"),
+        controls=_report_status(raw_report, "CONTROLS"),
+        mechanics=_report_status(raw_report, "MECHANICS"),
+        scoring=_report_status(raw_report, "SCORING"),
+        win_loss=_report_status(raw_report, "WIN_LOSS"),
+        reset=_report_status(raw_report, "RESET"),
+        design_compliance=_report_status(raw_report, "DESIGN_COMPLIANCE"),
+        performance_sanity=_report_status(raw_report, "PERFORMANCE_SANITY"),
+        evidence={"raw_report": raw_report},
+        defects=[line.strip() for line in raw_report.splitlines() if line.strip().startswith(("1.", "2.", "3.", "-"))],
+        fresh_for_iteration=iteration,
+    )
+    callback_context.state[STATE_STRUCTURED_TEST_REPORT] = report.model_dump()
+    return None
+
+
+def approval_evidence_is_fresh(state, decision: ReviewDecision) -> bool:
+    typecheck = state.get(STATE_TYPECHECK_RESULT, {}) or {}
+    build = state.get(STATE_BUILD_RESULT, {}) or {}
+    report = state.get(STATE_STRUCTURED_TEST_REPORT, {}) or {}
+    return (
+        decision.score >= 85
+        and typecheck.get("success") is True
+        and build.get("success") is True
+        and report.get("fresh_for_iteration") == state.get(STATE_ITERATION_COUNT)
+        and TestReport.model_validate(report).success
+        and not decision.defects
     )
 
 
@@ -309,6 +358,11 @@ def record_reviewer_route(callback_context: Context):
     )
     decision = _coerce_review_decision(review_feedback)
     decision.route = route
+    if route == ROUTE_APPROVE and not approval_evidence_is_fresh(state, decision):
+        decision.route = ROUTE_REVISE_DEVELOPER
+        decision.reasoning = "Approval blocked: fresh passing build and browser evidence are required. " + decision.reasoning
+        decision.required_changes.append("Provide fresh passing TestBridge browser evidence for this iteration.")
+        route = ROUTE_REVISE_DEVELOPER
     state[STATE_REVIEW_DECISION] = decision.model_dump()
     state[STATE_REVIEW_FEEDBACK] = review_feedback
     state[STATE_CURRENT_ROUTE] = route
@@ -364,6 +418,7 @@ def _default_manifest_from_state(state) -> GameManifest:
         has_audio=False,
         has_particles=False,
         has_progression=False,
+        approved_asset_keys=[],
     )
 
 
@@ -749,6 +804,17 @@ Define:
 GAME MANIFEST:
 engine must be PHASER_2D
 
+Select only approved_asset_keys that exist in:
+
+public/assets/library/asset-manifest.json
+
+The current approved fallback keys are placeholder-player,
+placeholder-enemy, placeholder-tile, placeholder-projectile,
+placeholder-panel, placeholder-spark, and placeholder-sound.
+
+Also select the needed optional features: pause, pointer input,
+camera follow, hit feedback, particles, audio, and progression.
+
 ARCHITECTURE:
 GAME STATE:
 INPUT HANDLING:
@@ -785,7 +851,9 @@ winner
 
 The game must also capture JavaScript runtime errors into:
 
-window.__GAME_TEST__.errors
+window.__GAME_TEST__.getErrors()
+
+window.__GAME_TEST__.errors is retained as a compatibility alias.
 
 Do not write the implementation.
 
@@ -867,6 +935,17 @@ Use run-relative paths such as:
 
 Do not read or write game_templates/phaser-2d.
 
+The run begins from the reusable production template, including:
+
+- src/game/systems
+- src/game/state
+- src/game/ui
+- public/assets/library/asset-manifest.json
+
+Keep simulation state separate from Phaser objects. Use approved local
+assets when appropriate and use procedural graphics only as a fallback.
+Never invent an asset path or make a network request.
+
 ============================================================
 INITIAL BUILD
 ============================================================
@@ -943,7 +1022,11 @@ window.__GAME_TEST__.getState()
 
 window.__GAME_TEST__.reset()
 
-window.__GAME_TEST__.errors
+window.__GAME_TEST__.getErrors()
+
+It may expose real simulation hooks when the genre needs them:
+setScore, spawnEnemy, teleportPlayer, getEntities, advanceState,
+triggerWin, and triggerLoss.
 
 getState() must return REAL current game state.
 
@@ -1045,6 +1128,7 @@ playtester = LlmAgent(
     model=MODEL,
 
     before_model_callback=throttle_model_calls,
+    after_agent_callback=record_test_report,
 
     include_contents="none",
 
@@ -1154,6 +1238,10 @@ window.__GAME_TEST__.reset()
 
 12. obtain state after reset
 
+Use TestBridge hooks to exercise real simulation rapidly where supplied:
+movement, scoring, interaction, win, loss, reset, and progression.
+Do not wait for long natural gameplay.
+
 Return ONE JSON-serializable object containing all evidence.
 
 ============================================================
@@ -1184,12 +1272,16 @@ and clearly identify every observed defect.
 Your final response must be concise and structured:
 
 OVERALL:
+BUILD:
 PAGE_LOAD:
-TEST_API:
-RUNTIME_ERRORS:
+CONSOLE:
 CONTROLS:
+MECHANICS:
+SCORING:
+WIN_LOSS:
 RESET:
 DESIGN_COMPLIANCE:
+PERFORMANCE_SANITY:
 DEFECTS:
 
 Never claim a test passed without browser evidence.
@@ -1275,11 +1367,13 @@ HUMAN_REVIEW
 APPROVE
 ============================================================
 
-Approve ONLY if the report contains:
+Use this weighted scoring rubric: functional correctness 40,
+design compliance 20, gameplay completeness 15, visual presentation 10,
+UI/UX 5, performance sanity 5, and build/code health 5.
 
-OVERALL: PASS
-
-and there are no critical defects.
+Always include SCORE: <0-100> after the route label. Approve only at
+SCORE >= 85 with all critical browser categories passing, a fresh report
+for the current iteration, and no critical defects.
 
 If the game passes:
 

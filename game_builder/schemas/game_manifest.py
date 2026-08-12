@@ -20,3 +20,8 @@ class GameManifest(BaseModel):
     has_audio: bool
     has_particles: bool
     has_progression: bool
+    approved_asset_keys: list[str] = Field(default_factory=list)
+    supports_pause: bool = True
+    supports_pointer_input: bool = False
+    uses_camera_follow: bool = False
+    uses_hit_feedback: bool = False

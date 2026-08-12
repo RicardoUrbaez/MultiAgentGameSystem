@@ -1,0 +1,11 @@
+{
+  "assets": [
+    { "key": "placeholder-player", "type": "image", "path": "assets/library/characters/placeholder-player.svg", "tags": ["character", "player", "fallback"] },
+    { "key": "placeholder-enemy", "type": "image", "path": "assets/library/enemies/placeholder-enemy.svg", "tags": ["enemy", "hazard", "fallback"] },
+    { "key": "placeholder-tile", "type": "image", "path": "assets/library/environment/placeholder-tile.svg", "tags": ["environment", "tile", "fallback"] },
+    { "key": "placeholder-projectile", "type": "image", "path": "assets/library/projectiles/placeholder-projectile.svg", "tags": ["projectile", "fallback"] },
+    { "key": "placeholder-panel", "type": "image", "path": "assets/library/ui/placeholder-panel.svg", "tags": ["ui", "panel", "fallback"] },
+    { "key": "placeholder-spark", "type": "image", "path": "assets/library/fx/placeholder-spark.svg", "tags": ["fx", "hit", "fallback"] },
+    { "key": "placeholder-sound", "type": "audio", "path": "assets/library/audio/README.txt", "tags": ["audio", "hook", "placeholder"] }
+  ]
+}
